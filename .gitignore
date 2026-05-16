@@ -1,0 +1,14 @@
+# Variabili d'ambiente — MAI caricare su GitHub!
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.Python
+venv/
+env/
+
+# OS
+.DS_Store
+Thumbs.db

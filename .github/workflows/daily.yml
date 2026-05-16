@@ -1,0 +1,32 @@
+name: Steam Deals Daily
+
+on:
+  schedule:
+    # Ogni giorno alle 09:00 ora italiana (08:00 UTC in ora solare, 07:00 UTC in ora legale)
+    # Imposta su 07:00 UTC per coprire l'ora legale (aprile-ottobre)
+    - cron: "0 7 * * *"
+
+  # Permette di avviare il workflow manualmente da GitHub
+  workflow_dispatch:
+
+jobs:
+  send-deals:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests python-dotenv
+
+      - name: Run bot (daily mode)
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+        run: python bot.py daily
