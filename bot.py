@@ -31,10 +31,17 @@ def get_top_deals(min_savings=50, page_size=30):
         "lowerPrice": "0.01",
     }
     r = requests.get(CHEAPSHARK_URL, params=params, timeout=10)
-    r.raise_for_status()
+    print(f"   CheapShark status: {r.status_code}, bytes: {len(r.content)}")
+    if r.status_code != 200:
+        print(f"   Risposta: {r.text[:200]}")
+        return []
     deals = r.json()
-    # Filtra solo per sconto minimo — nessun filtro rating che esclude giochi validi
-    return [d for d in deals if float(d.get("savings", 0)) >= min_savings]
+    print(f"   API ha ritornato {len(deals)} deals totali")
+    if deals:
+        savings_vals = [float(d.get("savings", 0)) for d in deals]
+        print(f"   Saving range: {min(savings_vals):.0f}% - {max(savings_vals):.0f}%")
+    filtered = [d for d in deals if float(d.get("savings", 0)) >= min_savings]
+    return filtered
 
 
 def get_free_games():
@@ -357,10 +364,22 @@ def run_daily():
     # Cancella i messaggi del giorno prima
     delete_previous_messages()
 
-    # Invia i nuovi messaggi e salva gli ID
+    # Fetch e debug deals
+    print("🔍 Chiamo get_top_deals()...")
     deals = get_top_deals()
+    print(f"   → {len(deals)} deals trovati con saving>=50%")
+    for d in deals[:3]:
+        print(f"      {d['title']} | saving={float(d.get('savings',0)):.0f}%")
+
+    print("🔍 Chiamo get_free_games()...")
     free = get_free_games()
+    print(f"   → {len(free)} giochi gratuiti trovati")
+
     msg = build_daily_message(deals, free)
+    print(f"📝 Messaggio generato ({len(msg)} caratteri):")
+    print(msg[:300])
+    print("...")
+
     result = send_message(CHAT_ID, msg)
 
     # Salva l'ID del messaggio appena inviato
