@@ -7,6 +7,7 @@ Steam Deals Telegram Bot
 import os
 import sys
 import json
+import re
 import requests
 from datetime import datetime
 from dotenv import load_dotenv
@@ -22,120 +23,158 @@ MESSAGE_IDS_FILE = "message_ids.json"
 # Steam / CheapShark API
 # ---------------------------------------------------------------------------
 
-def get_top_deals(min_savings=50, page_size=30):
+def fetch_deals(page_size=60, upper_price=None, lower_price="0.01"):
     params = {
         "storeID": "1",
         "pageSize": page_size,
-        "sortBy": "Savings",
-        "desc": "1",
-        "lowerPrice": "0.01",
+        "onSale": "1",
     }
-    r = requests.get(CHEAPSHARK_URL, params=params, timeout=10)
-    print(f"   CheapShark status: {r.status_code}, bytes: {len(r.content)}")
-    if r.status_code != 200:
-        print(f"   Risposta: {r.text[:200]}")
-        return []
-    deals = r.json()
-    print(f"   API ha ritornato {len(deals)} deals totali")
-    if deals:
-        savings_vals = [float(d.get("savings", 0)) for d in deals]
-        print(f"   Saving range: {min(savings_vals):.0f}% - {max(savings_vals):.0f}%")
-    filtered = [d for d in deals if float(d.get("savings", 0)) >= min_savings]
-    return filtered
-
-
-def get_free_games():
-    params = {
-        "storeID": "1",
-        "upperPrice": "0",
-        "pageSize": "10",
-        "sortBy": "Savings",
-    }
+    if upper_price is not None:
+        params["upperPrice"] = upper_price
+    if lower_price:
+        params["lowerPrice"] = lower_price
     r = requests.get(CHEAPSHARK_URL, params=params, timeout=10)
     r.raise_for_status()
     return r.json()
 
 
-def get_extreme_deals():
-    """Giochi scontati 90%+."""
-    return get_top_deals(min_savings=90, page_size=15)
+def score(d):
+    """Risparmio in euro pesato per rating Steam. Premia giochi costosi e ben recensiti."""
+    normal = float(d.get("normalPrice", 0))
+    sale = float(d.get("salePrice", 0))
+    saved = normal - sale
+    rating = float(d.get("steamRatingPercent", 70)) / 100
+    return saved * (0.5 + rating)
 
 
-def get_under_5_euro():
-    """Offerte Steam con prezzo finale < 5€."""
-    params = {
-        "storeID": "1",
-        "pageSize": "20",
-        "sortBy": "Price",
-        "upperPrice": "5",
-        "lowerPrice": "0.01",
-    }
-    r = requests.get(CHEAPSHARK_URL, params=params, timeout=10)
-    r.raise_for_status()
-    return r.json()[:8]
+def get_all_on_sale(page_size=60):
+    deals = fetch_deals(page_size=page_size)
+    return [d for d in deals if float(d.get("savings", 0)) > 0]
+
+
+def get_free_games():
+    deals = fetch_deals(page_size=15, upper_price="0", lower_price=None)
+    deals.sort(key=lambda d: float(d.get("normalPrice", 0)), reverse=True)
+    return deals
+
+
+def get_god_tier(min_original=20.0, min_savings_pct=60):
+    """Giochi di peso (prezzo originale alto) con sconto significativo."""
+    deals = get_all_on_sale(page_size=60)
+    filtered = [
+        d for d in deals
+        if float(d.get("normalPrice", 0)) >= min_original
+        and float(d.get("savings", 0)) >= min_savings_pct
+    ]
+    filtered.sort(key=score, reverse=True)
+    return filtered
+
+
+def get_best_value(min_savings_pct=50, exclude_god_tier=True):
+    """Top offerte per score, esclusi i God Tier."""
+    deals = get_all_on_sale(page_size=60)
+    filtered = [d for d in deals if float(d.get("savings", 0)) >= min_savings_pct]
+    if exclude_god_tier:
+        filtered = [
+            d for d in filtered
+            if not (float(d.get("normalPrice", 0)) >= 20.0
+                    and float(d.get("savings", 0)) >= 60)
+        ]
+    filtered.sort(key=score, reverse=True)
+    return filtered
+
+
+def get_hidden_gems(max_rating_count=500, min_savings_pct=50):
+    """Indie poco noti con sconto alto e rating buono."""
+    deals = get_all_on_sale(page_size=60)
+    filtered = [
+        d for d in deals
+        if float(d.get("savings", 0)) >= min_savings_pct
+        and int(d.get("steamRatingCount", 9999)) <= max_rating_count
+        and int(d.get("steamRatingCount", 0)) > 10
+        and float(d.get("steamRatingPercent", 0)) >= 70
+    ]
+    filtered.sort(key=score, reverse=True)
+    return filtered
+
+
+def get_cheap_gems(max_price=3.0):
+    """Giochi ben recensiti sotto €3 che normalmente costano di più."""
+    deals = get_all_on_sale(page_size=60)
+    filtered = [
+        d for d in deals
+        if float(d.get("salePrice", 99)) <= max_price
+        and float(d.get("steamRatingPercent", 0)) >= 75
+        and float(d.get("normalPrice", 0)) >= 5
+    ]
+    filtered.sort(key=lambda d: float(d.get("steamRatingPercent", 0)), reverse=True)
+    return filtered
+
+
+def get_top_savings():
+    """Top per risparmio assoluto in euro."""
+    deals = get_all_on_sale(page_size=60)
+    filtered = [d for d in deals if float(d.get("savings", 0)) >= 40]
+    filtered.sort(
+        key=lambda d: float(d.get("normalPrice", 0)) - float(d.get("salePrice", 0)),
+        reverse=True
+    )
+    return filtered
 
 
 # ---------------------------------------------------------------------------
-# Formattatori messaggi (HTML — molto più robusto di MarkdownV2)
+# Formattatori
 # ---------------------------------------------------------------------------
 
 def h(text):
-    """Escape caratteri speciali HTML."""
     return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def steam_url(d):
-    steam_id = d.get("steamAppID", "")
-    return f"https://store.steampowered.com/app/{steam_id}" if steam_id else "https://store.steampowered.com"
+    sid = d.get("steamAppID", "")
+    return f"https://store.steampowered.com/app/{sid}" if sid else "https://store.steampowered.com"
 
 
 def deal_line(d):
     title = h(d["title"])
     normal = float(d["normalPrice"])
     sale = float(d["salePrice"])
-    savings = int(float(d["savings"]))
+    savings_pct = int(float(d["savings"]))
+    saved_eur = normal - sale
+    rating = d.get("steamRatingPercent", "?")
     url = steam_url(d)
-
-    if savings >= 90:
-        badge = "🔴"
-    elif savings >= 75:
-        badge = "🟠"
-    elif savings >= 50:
-        badge = "🟡"
-    else:
-        badge = "🟢"
+    rating_str = f" · {rating}%" if rating != "?" else ""
 
     return (
-        f'{badge} <a href="{url}">{title}</a>\n'
-        f'   <s>€{normal:.2f}</s> → <b>€{sale:.2f}</b> (-{savings}%)\n'
+        f'<a href="{url}">{title}</a>\n'
+        f'<s>€{normal:.2f}</s> → <b>€{sale:.2f}</b>  <b>-{savings_pct}%</b>  risparmi €{saved_eur:.2f}{rating_str}\n'
     )
 
 
-def build_daily_message(deals, free_games):
+def build_daily_message(god_tier, free_games, best_value):
     today = datetime.now().strftime("%d/%m/%Y")
     lines = [f"🎮 <b>Steam Deals — {today}</b>\n"]
 
+    if god_tier:
+        lines.append("🏆 <b>GOD TIER</b> — occasioni da non perdere")
+        lines.append("<i>Giochi &gt;€20 scontati &gt;60%, per risparmio reale</i>")
+        for d in god_tier[:6]:
+            lines.append(deal_line(d))
+    else:
+        lines.append("🏆 <b>GOD TIER</b> — nessuna occasione oggi\n")
+
     if free_games:
         lines.append("🎁 <b>GRATIS OGGI</b>")
-        for g in free_games[:3]:
+        for g in free_games[:4]:
             title = h(g["title"])
             normal = float(g["normalPrice"])
             url = steam_url(g)
-            lines.append(f'• <a href="{url}">{title}</a> <s>€{normal:.2f}</s> → <b>GRATIS</b>')
+            lines.append(f'• <a href="{url}">{title}</a>  <s>€{normal:.2f}</s> → <b>GRATIS</b>')
         lines.append("")
 
-    top = [d for d in deals if float(d.get("savings", 0)) >= 70]
-    mid = [d for d in deals if 50 <= float(d.get("savings", 0)) < 70]
-
-    if top:
-        lines.append("🔥 <b>SCONTI 70%+</b>")
-        for d in top[:8]:
-            lines.append(deal_line(d))
-        lines.append("")
-
-    if mid:
-        lines.append("⚡ <b>SCONTI 50–69%</b>")
-        for d in mid[:6]:
+    if best_value:
+        lines.append("💎 <b>BEST VALUE</b> — miglior rapporto qualità/sconto")
+        for d in best_value[:6]:
             lines.append(deal_line(d))
 
     lines.append(f"<i>Aggiornato alle {datetime.now().strftime('%H:%M')}</i>")
@@ -147,7 +186,6 @@ def build_daily_message(deals, free_games):
 # ---------------------------------------------------------------------------
 
 def send_message(chat_id, text, parse_mode="HTML"):
-    # Telegram max 4096 caratteri — tronca se necessario
     if len(text) > 4000:
         text = text[:3990] + "\n<i>... (lista troncata)</i>"
 
@@ -159,21 +197,15 @@ def send_message(chat_id, text, parse_mode="HTML"):
         "disable_web_page_preview": True,
         "link_preview_options": {"is_disabled": True},
     }
-    # Rimuovi parse_mode se None
     if parse_mode is None:
         del payload["parse_mode"]
 
     r = requests.post(url, json=payload, timeout=10)
 
-    # Se fallisce con HTML, riprova senza formattazione
     if r.status_code == 400 and parse_mode == "HTML":
-        print(f"⚠️ Errore HTML parsing, riprovo in plain text...")
-        print(f"   Risposta Telegram: {r.text}")
-        plain = text.replace("<b>", "").replace("</b>", "").replace("<i>", "").replace("</i>", "")
-        plain = plain.replace("<s>", "").replace("</s>", "").replace("<u>", "").replace("</u>", "")
-        # Rimuovi tag <a href="...">...</a> mantenendo il testo
-        import re
-        plain = re.sub(r'<a href="[^"]*">([^<]*)</a>', r'\1', plain)
+        print(f"⚠️ Errore HTML, riprovo plain. Risposta: {r.text}")
+        plain = re.sub(r'<a href="[^"]*">([^<]*)</a>', r'\1', text)
+        plain = re.sub(r'<[^>]+>', '', plain)
         payload2 = {"chat_id": chat_id, "text": plain, "disable_web_page_preview": True}
         r = requests.post(url, json=payload2, timeout=10)
 
@@ -196,15 +228,15 @@ def get_updates(offset=None):
 
 
 def set_commands():
-    """Registra i comandi nel menu Telegram."""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setMyCommands"
     commands = [
-        {"command": "start",    "description": "Benvenuto e lista comandi"},
-        {"command": "deals",    "description": "Top offerte del giorno"},
-        {"command": "free",     "description": "Giochi gratuiti su Steam"},
-        {"command": "extreme",  "description": "Sconti oltre il 90%"},
-        {"command": "under5",   "description": "Offerte sotto i 5€"},
-        {"command": "help",     "description": "Mostra tutti i comandi"},
+        {"command": "deals",   "description": "Digest giornaliero completo"},
+        {"command": "godtier", "description": "Giochi costosi in super sconto"},
+        {"command": "free",    "description": "Giochi gratuiti oggi"},
+        {"command": "gems",    "description": "Indie nascosti da scoprire"},
+        {"command": "cheap",   "description": "Giochi buoni sotto 3 euro"},
+        {"command": "savings", "description": "Top risparmio assoluto in euro"},
+        {"command": "help",    "description": "Lista comandi"},
     ]
     requests.post(url, json={"commands": commands}, timeout=10)
 
@@ -216,27 +248,44 @@ def set_commands():
 def handle_start(chat_id):
     msg = (
         "👋 <b>Ciao! Sono il tuo Steam Deals Bot</b> 🎮\n\n"
-        "Ogni mattina ti mando le migliori offerte Steam.\n"
-        "Puoi anche chiederle tu quando vuoi!\n\n"
-        "📋 <b>Comandi disponibili:</b>\n"
-        "/deals — Top offerte del giorno\n"
-        "/free — Giochi gratuiti\n"
-        "/extreme — Sconti 90%+\n"
-        "/under5 — Tutto sotto 5€\n"
+        "Ogni mattina ti mando le migliori offerte Steam, filtrate per <b>valore reale</b>.\n\n"
+        "📋 <b>Comandi:</b>\n"
+        "/deals — Digest completo del giorno\n"
+        "/godtier — Giochi &gt;€20 con sconto &gt;60%\n"
+        "/free — Giochi gratuiti oggi\n"
+        "/gems — Indie nascosti con alto sconto\n"
+        "/cheap — Giochi buoni sotto €3\n"
+        "/savings — Top risparmio assoluto in €\n"
         "/help — Questa lista\n"
     )
     send_message(chat_id, msg)
 
 
 def handle_deals(chat_id):
-    send_plain(chat_id, "🔍 Cerco le offerte...")
+    send_plain(chat_id, "🔍 Cerco le offerte del giorno...")
     try:
-        deals = get_top_deals()
+        god = get_god_tier()
         free = get_free_games()
-        msg = build_daily_message(deals, free)
+        best = get_best_value()
+        msg = build_daily_message(god, free, best)
         send_message(chat_id, msg)
     except Exception as e:
-        send_plain(chat_id, f"❌ Errore nel recupero offerte: {e}")
+        send_plain(chat_id, f"❌ Errore: {e}")
+
+
+def handle_godtier(chat_id):
+    send_plain(chat_id, "🏆 Cerco le occasioni God Tier...")
+    try:
+        deals = get_god_tier()
+        if not deals:
+            send_plain(chat_id, "😅 Nessun gioco God Tier oggi. Riprova domani.")
+            return
+        lines = ["🏆 <b>GOD TIER</b> — giochi &gt;€20 con sconto &gt;60%\n"]
+        for d in deals[:8]:
+            lines.append(deal_line(d))
+        send_message(chat_id, "\n".join(lines))
+    except Exception as e:
+        send_plain(chat_id, f"❌ Errore: {e}")
 
 
 def handle_free(chat_id):
@@ -247,40 +296,55 @@ def handle_free(chat_id):
             send_plain(chat_id, "😅 Nessun gioco gratuito trovato al momento.")
             return
         lines = ["🎁 <b>GIOCHI GRATIS SU STEAM</b>\n"]
-        for g in games:
+        for g in games[:8]:
             title = h(g["title"])
             normal = float(g["normalPrice"])
             url = steam_url(g)
-            lines.append(f'• <a href="{url}">{title}</a> <s>€{normal:.2f}</s> → <b>GRATIS</b>')
+            lines.append(f'• <a href="{url}">{title}</a>  <s>€{normal:.2f}</s> → <b>GRATIS</b>')
         send_message(chat_id, "\n".join(lines))
     except Exception as e:
         send_plain(chat_id, f"❌ Errore: {e}")
 
 
-def handle_extreme(chat_id):
-    send_plain(chat_id, "🔴 Cerco sconti oltre il 90%...")
+def handle_gems(chat_id):
+    send_plain(chat_id, "💎 Cerco indie nascosti...")
     try:
-        deals = get_extreme_deals()
+        deals = get_hidden_gems()
         if not deals:
-            send_plain(chat_id, "😅 Nessuno sconto sopra il 90% al momento.")
+            send_plain(chat_id, "😅 Nessuna hidden gem trovata oggi.")
             return
-        lines = ["🔴 <b>SCONTI 90%+</b>\n"]
-        for d in deals:
+        lines = ["💎 <b>HIDDEN GEMS</b> — indie poco noti, molto scontati\n"]
+        for d in deals[:8]:
             lines.append(deal_line(d))
         send_message(chat_id, "\n".join(lines))
     except Exception as e:
         send_plain(chat_id, f"❌ Errore: {e}")
 
 
-def handle_under5(chat_id):
-    send_plain(chat_id, "💸 Cerco offerte sotto 5€...")
+def handle_cheap(chat_id):
+    send_plain(chat_id, "🪙 Cerco giochi buoni sotto €3...")
     try:
-        deals = get_under_5_euro()
+        deals = get_cheap_gems()
         if not deals:
-            send_plain(chat_id, "😅 Nessuna offerta sotto 5€ al momento.")
+            send_plain(chat_id, "😅 Nessun gioco trovato sotto €3 con buon rating.")
             return
-        lines = ["💸 <b>OFFERTE SOTTO 5€</b>\n"]
-        for d in deals:
+        lines = ["🪙 <b>CHEAP &amp; GOOD</b> — ottimi giochi sotto €3\n"]
+        for d in deals[:8]:
+            lines.append(deal_line(d))
+        send_message(chat_id, "\n".join(lines))
+    except Exception as e:
+        send_plain(chat_id, f"❌ Errore: {e}")
+
+
+def handle_savings(chat_id):
+    send_plain(chat_id, "💸 Cerco i massimi risparmi assoluti...")
+    try:
+        deals = get_top_savings()
+        if not deals:
+            send_plain(chat_id, "😅 Nessuna offerta trovata.")
+            return
+        lines = ["💸 <b>TOP RISPARMIO</b> — massimo risparmio in €\n"]
+        for d in deals[:8]:
             lines.append(deal_line(d))
         send_message(chat_id, "\n".join(lines))
     except Exception as e:
@@ -290,12 +354,14 @@ def handle_under5(chat_id):
 def handle_help(chat_id):
     msg = (
         "📋 <b>Comandi disponibili</b>\n\n"
-        "/deals — Top offerte del giorno (scontate 70%+)\n"
-        "/free — Giochi temporaneamente gratuiti\n"
-        "/extreme — Solo sconti oltre il 90%\n"
-        "/under5 — Tutto ciò che costa meno di 5€\n"
-        "/help — Mostra questa lista\n\n"
-        "💡 Il bot ti manda le offerte ogni mattina in automatico!"
+        "/deals — Digest completo (God Tier + Gratis + Best Value)\n"
+        "/godtier — Giochi &gt;€20 con sconto &gt;60%, per risparmio reale\n"
+        "/free — Giochi temporaneamente gratuiti, dal più costoso\n"
+        "/gems — Indie poco noti, sconto alto, rating buono\n"
+        "/cheap — Giochi ben recensiti sotto €3\n"
+        "/savings — Top per risparmio assoluto in €\n"
+        "/help — Questa lista\n\n"
+        "💡 Il bot ti manda il digest ogni mattina in automatico!"
     )
     send_message(chat_id, msg)
 
@@ -303,12 +369,13 @@ def handle_help(chat_id):
 HANDLERS = {
     "/start":   handle_start,
     "/deals":   handle_deals,
+    "/godtier": handle_godtier,
     "/free":    handle_free,
-    "/extreme": handle_extreme,
-    "/under5":  handle_under5,
+    "/gems":    handle_gems,
+    "/cheap":   handle_cheap,
+    "/savings": handle_savings,
     "/help":    handle_help,
 }
-
 
 
 # ---------------------------------------------------------------------------
@@ -316,7 +383,6 @@ HANDLERS = {
 # ---------------------------------------------------------------------------
 
 def load_message_ids():
-    """Carica gli ID dei messaggi salvati dal giorno prima."""
     if not os.path.exists(MESSAGE_IDS_FILE):
         return []
     try:
@@ -327,29 +393,23 @@ def load_message_ids():
 
 
 def save_message_ids(ids):
-    """Salva gli ID dei messaggi appena inviati."""
     with open(MESSAGE_IDS_FILE, "w") as f:
         json.dump(ids, f)
 
 
 def delete_message(chat_id, message_id):
-    """Cancella un singolo messaggio dal bot."""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteMessage"
     r = requests.post(url, json={"chat_id": chat_id, "message_id": message_id}, timeout=10)
     return r.status_code == 200
 
 
 def delete_previous_messages():
-    """Cancella tutti i messaggi inviati dal bot il giorno prima."""
     ids = load_message_ids()
     if not ids:
         print("📭 Nessun messaggio precedente da cancellare.")
         return
     print(f"🗑️ Cancello {len(ids)} messaggi precedenti...")
-    deleted = 0
-    for msg_id in ids:
-        if delete_message(CHAT_ID, msg_id):
-            deleted += 1
+    deleted = sum(1 for mid in ids if delete_message(CHAT_ID, mid))
     print(f"✅ Cancellati {deleted}/{len(ids)} messaggi.")
 
 
@@ -358,40 +418,25 @@ def delete_previous_messages():
 # ---------------------------------------------------------------------------
 
 def run_daily():
-    """Invia il messaggio giornaliero. Usato da GitHub Actions."""
     print("📡 Modalità: invio giornaliero")
-
-    # Cancella i messaggi del giorno prima
     delete_previous_messages()
 
-    # Fetch e debug deals
-    print("🔍 Chiamo get_top_deals()...")
-    deals = get_top_deals()
-    print(f"   → {len(deals)} deals trovati con saving>=50%")
-    for d in deals[:3]:
-        print(f"      {d['title']} | saving={float(d.get('savings',0)):.0f}%")
-
-    print("🔍 Chiamo get_free_games()...")
+    god = get_god_tier()
     free = get_free_games()
-    print(f"   → {len(free)} giochi gratuiti trovati")
+    best = get_best_value()
+    print(f"✅ God Tier: {len(god)}, Gratis: {len(free)}, Best Value: {len(best)}")
 
-    msg = build_daily_message(deals, free)
-    print(f"📝 Messaggio generato ({len(msg)} caratteri):")
-    print(msg[:300])
-    print("...")
-
+    msg = build_daily_message(god, free, best)
     result = send_message(CHAT_ID, msg)
 
-    # Salva l'ID del messaggio appena inviato
     new_ids = []
     if result and result.get("ok"):
         new_ids.append(result["result"]["message_id"])
     save_message_ids(new_ids)
-    print(f"✅ Messaggio inviato! ID salvato: {new_ids}")
+    print(f"✅ Inviato! ID: {new_ids}")
 
 
 def run_polling():
-    """Ascolta i comandi Telegram in tempo reale."""
     print("🤖 Bot avviato in modalità polling. Ctrl+C per fermare.")
     set_commands()
     offset = None
@@ -402,12 +447,12 @@ def run_polling():
                 offset = update["update_id"] + 1
                 message = update.get("message", {})
                 chat_id = message.get("chat", {}).get("id")
-                text = message.get("text", "").strip().split("@")[0]  # rimuove @botname
+                text = message.get("text", "").strip().split("@")[0]
 
                 if not chat_id or not text:
                     continue
 
-                print(f"📩 Comando ricevuto: {text} da {chat_id}")
+                print(f"📩 Comando: {text} da {chat_id}")
                 handler = HANDLERS.get(text)
                 if handler:
                     handler(chat_id)
@@ -418,7 +463,7 @@ def run_polling():
             print("\n👋 Bot fermato.")
             break
         except Exception as e:
-            print(f"⚠️ Errore: {e}")
+            print(f"⚠️ Errore polling: {e}")
 
 
 # ---------------------------------------------------------------------------
