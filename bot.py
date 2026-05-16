@@ -22,18 +22,18 @@ MESSAGE_IDS_FILE = "message_ids.json"
 # Steam / CheapShark API
 # ---------------------------------------------------------------------------
 
-def get_top_deals(min_savings=50, min_rating=70, page_size=20):
+def get_top_deals(min_savings=50, page_size=30):
     params = {
         "storeID": "1",
         "pageSize": page_size,
         "sortBy": "Savings",
         "desc": "1",
-        "steamRating": min_rating,
         "lowerPrice": "0.01",
     }
     r = requests.get(CHEAPSHARK_URL, params=params, timeout=10)
     r.raise_for_status()
     deals = r.json()
+    # Filtra solo per sconto minimo — nessun filtro rating che esclude giochi validi
     return [d for d in deals if float(d.get("savings", 0)) >= min_savings]
 
 
@@ -41,7 +41,7 @@ def get_free_games():
     params = {
         "storeID": "1",
         "upperPrice": "0",
-        "pageSize": "5",
+        "pageSize": "10",
         "sortBy": "Savings",
     }
     r = requests.get(CHEAPSHARK_URL, params=params, timeout=10)
@@ -51,18 +51,17 @@ def get_free_games():
 
 def get_extreme_deals():
     """Giochi scontati 90%+."""
-    return get_top_deals(min_savings=90, min_rating=60, page_size=10)
+    return get_top_deals(min_savings=90, page_size=15)
 
 
 def get_under_5_euro():
     """Offerte Steam con prezzo finale < 5€."""
     params = {
         "storeID": "1",
-        "pageSize": "15",
+        "pageSize": "20",
         "sortBy": "Price",
         "upperPrice": "5",
         "lowerPrice": "0.01",
-        "steamRating": "70",
     }
     r = requests.get(CHEAPSHARK_URL, params=params, timeout=10)
     r.raise_for_status()
