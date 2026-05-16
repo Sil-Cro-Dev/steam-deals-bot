@@ -68,22 +68,25 @@ def get_under_5_euro():
 
 
 # ---------------------------------------------------------------------------
-# Formattatori messaggi
+# Formattatori messaggi (HTML — molto più robusto di MarkdownV2)
 # ---------------------------------------------------------------------------
 
-def escape(text):
-    """Escape caratteri speciali per MarkdownV2."""
-    special = r"_*[]()~`>#+-=|{}.!"
-    return "".join(f"\\{c}" if c in special else c for c in str(text))
+def h(text):
+    """Escape caratteri speciali HTML."""
+    return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-def deal_line(d, show_rating=False):
-    title = escape(d["title"])
+def steam_url(d):
+    steam_id = d.get("steamAppID", "")
+    return f"https://store.steampowered.com/app/{steam_id}" if steam_id else "https://store.steampowered.com"
+
+
+def deal_line(d):
+    title = h(d["title"])
     normal = float(d["normalPrice"])
     sale = float(d["salePrice"])
     savings = int(float(d["savings"]))
-    steam_id = d.get("steamAppID", "")
-    url = f"https://store.steampowered.com/app/{steam_id}" if steam_id else "https://store.steampowered.com"
+    url = steam_url(d)
 
     if savings >= 90:
         badge = "🔴"
@@ -94,33 +97,31 @@ def deal_line(d, show_rating=False):
     else:
         badge = "🟢"
 
-    rating_str = f" ⭐{d['steamRatingText']}" if show_rating and d.get("steamRatingText") else ""
     return (
-        f"{badge} [{title}]({url})\n"
-        f"   ~~€{escape(f'{normal:.2f}')}~~ → *€{escape(f'{sale:.2f}')}* \\(\\-{savings}%\\){escape(rating_str)}\n"
+        f'{badge} <a href="{url}">{title}</a>\n'
+        f'   <s>€{normal:.2f}</s> → <b>€{sale:.2f}</b> (-{savings}%)\n'
     )
 
 
 def build_daily_message(deals, free_games):
-    today = escape(datetime.now().strftime("%d/%m/%Y"))
-    lines = [f"🎮 *Steam Deals — {today}*\n"]
+    today = datetime.now().strftime("%d/%m/%Y")
+    lines = [f"🎮 <b>Steam Deals — {today}</b>\n"]
 
     if free_games:
-        lines.append("🎁 *GRATIS OGGI*")
+        lines.append("🎁 <b>GRATIS OGGI</b>")
         for g in free_games[:3]:
-            title = escape(g["title"])
+            title = h(g["title"])
             normal = float(g["normalPrice"])
-            steam_id = g.get("steamAppID", "")
-            url = f"https://store.steampowered.com/app/{steam_id}" if steam_id else "https://store.steampowered.com"
-            lines.append(f"• [{title}]({url}) ~~€{escape(f'{normal:.2f}')}~~ → *GRATIS*")
+            url = steam_url(g)
+            lines.append(f'• <a href="{url}">{title}</a> <s>€{normal:.2f}</s> → <b>GRATIS</b>')
         lines.append("")
 
     if deals:
-        lines.append("🔥 *TOP OFFERTE DEL GIORNO*")
+        lines.append("🔥 <b>TOP OFFERTE DEL GIORNO</b>")
         for d in deals[:8]:
             lines.append(deal_line(d))
 
-    lines.append(f"_Aggiornato alle {escape(datetime.now().strftime('%H:%M'))}_")
+    lines.append(f"<i>Aggiornato alle {datetime.now().strftime('%H:%M')}</i>")
     return "\n".join(lines)
 
 
@@ -128,7 +129,7 @@ def build_daily_message(deals, free_games):
 # Telegram API
 # ---------------------------------------------------------------------------
 
-def send_message(chat_id, text, parse_mode="MarkdownV2"):
+def send_message(chat_id, text, parse_mode="HTML"):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
         "chat_id": chat_id,
@@ -175,13 +176,13 @@ def set_commands():
 
 def handle_start(chat_id):
     msg = (
-        "👋 *Ciao\\! Sono il tuo Steam Deals Bot* 🎮\n\n"
-        "Ogni mattina ti mando le migliori offerte Steam\\.\n"
-        "Puoi anche chiederle tu quando vuoi\\!\n\n"
-        "📋 *Comandi disponibili:*\n"
+        "👋 <b>Ciao! Sono il tuo Steam Deals Bot</b> 🎮\n\n"
+        "Ogni mattina ti mando le migliori offerte Steam.\n"
+        "Puoi anche chiederle tu quando vuoi!\n\n"
+        "📋 <b>Comandi disponibili:</b>\n"
         "/deals — Top offerte del giorno\n"
         "/free — Giochi gratuiti\n"
-        "/extreme — Sconti 90%\\+\n"
+        "/extreme — Sconti 90%+\n"
         "/under5 — Tutto sotto 5€\n"
         "/help — Questa lista\n"
     )
@@ -206,13 +207,12 @@ def handle_free(chat_id):
         if not games:
             send_plain(chat_id, "😅 Nessun gioco gratuito trovato al momento.")
             return
-        lines = ["🎁 *GIOCHI GRATIS SU STEAM*\n"]
+        lines = ["🎁 <b>GIOCHI GRATIS SU STEAM</b>\n"]
         for g in games:
-            title = escape(g["title"])
+            title = h(g["title"])
             normal = float(g["normalPrice"])
-            steam_id = g.get("steamAppID", "")
-            url = f"https://store.steampowered.com/app/{steam_id}" if steam_id else "https://store.steampowered.com"
-            lines.append(f"• [{title}]({url}) ~~€{escape(f'{normal:.2f}')}~~ → *GRATIS*")
+            url = steam_url(g)
+            lines.append(f'• <a href="{url}">{title}</a> <s>€{normal:.2f}</s> → <b>GRATIS</b>')
         send_message(chat_id, "\n".join(lines))
     except Exception as e:
         send_plain(chat_id, f"❌ Errore: {e}")
@@ -225,7 +225,7 @@ def handle_extreme(chat_id):
         if not deals:
             send_plain(chat_id, "😅 Nessuno sconto sopra il 90% al momento.")
             return
-        lines = ["🔴 *SCONTI 90%\\+*\n"]
+        lines = ["🔴 <b>SCONTI 90%+</b>\n"]
         for d in deals:
             lines.append(deal_line(d))
         send_message(chat_id, "\n".join(lines))
@@ -240,7 +240,7 @@ def handle_under5(chat_id):
         if not deals:
             send_plain(chat_id, "😅 Nessuna offerta sotto 5€ al momento.")
             return
-        lines = ["💸 *OFFERTE SOTTO 5€*\n"]
+        lines = ["💸 <b>OFFERTE SOTTO 5€</b>\n"]
         for d in deals:
             lines.append(deal_line(d))
         send_message(chat_id, "\n".join(lines))
@@ -250,13 +250,13 @@ def handle_under5(chat_id):
 
 def handle_help(chat_id):
     msg = (
-        "📋 *Comandi disponibili*\n\n"
-        "/deals — Top offerte del giorno \\(scontate 70%\\+\\)\n"
+        "📋 <b>Comandi disponibili</b>\n\n"
+        "/deals — Top offerte del giorno (scontate 70%+)\n"
         "/free — Giochi temporaneamente gratuiti\n"
         "/extreme — Solo sconti oltre il 90%\n"
         "/under5 — Tutto ciò che costa meno di 5€\n"
         "/help — Mostra questa lista\n\n"
-        "💡 Il bot ti manda le offerte ogni mattina in automatico\\!"
+        "💡 Il bot ti manda le offerte ogni mattina in automatico!"
     )
     send_message(chat_id, msg)
 
