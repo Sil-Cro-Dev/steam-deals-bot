@@ -2,8 +2,7 @@ name: Steam Deals Daily
 
 on:
   schedule:
-    # Ogni giorno alle 09:00 ora italiana (08:00 UTC in ora solare, 07:00 UTC in ora legale)
-    # Imposta su 07:00 UTC per coprire l'ora legale (aprile-ottobre)
+    # Ogni giorno alle 09:00 ora italiana (07:00 UTC in ora legale)
     - cron: "0 7 * * *"
 
   # Permette di avviare il workflow manualmente da GitHub
@@ -12,6 +11,10 @@ on:
 jobs:
   send-deals:
     runs-on: ubuntu-latest
+
+    # Permessi per committare message_ids.json nel repo
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout repository
@@ -30,3 +33,11 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
         run: python bot.py daily
+
+      - name: Salva message_ids.json nel repository
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add message_ids.json
+          git diff --staged --quiet || git commit -m "chore: aggiorna message_ids [skip ci]"
+          git push

@@ -6,6 +6,7 @@ Steam Deals Telegram Bot
 
 import os
 import sys
+import json
 import requests
 from datetime import datetime
 from dotenv import load_dotenv
@@ -15,12 +16,13 @@ load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 CHEAPSHARK_URL = "https://www.cheapshark.com/api/1.0/deals"
+MESSAGE_IDS_FILE = "message_ids.json"
 
 # ---------------------------------------------------------------------------
 # Steam / CheapShark API
 # ---------------------------------------------------------------------------
 
-def get_top_deals(min_savings=70, min_rating=70, page_size=8):
+def get_top_deals(min_savings=50, min_rating=70, page_size=20):
     params = {
         "storeID": "1",
         "pageSize": page_size,
@@ -116,9 +118,18 @@ def build_daily_message(deals, free_games):
             lines.append(f'• <a href="{url}">{title}</a> <s>€{normal:.2f}</s> → <b>GRATIS</b>')
         lines.append("")
 
-    if deals:
-        lines.append("🔥 <b>TOP OFFERTE DEL GIORNO</b>")
-        for d in deals[:8]:
+    top = [d for d in deals if float(d.get("savings", 0)) >= 70]
+    mid = [d for d in deals if 50 <= float(d.get("savings", 0)) < 70]
+
+    if top:
+        lines.append("🔥 <b>SCONTI 70%+</b>")
+        for d in top[:8]:
+            lines.append(deal_line(d))
+        lines.append("")
+
+    if mid:
+        lines.append("⚡ <b>SCONTI 50–69%</b>")
+        for d in mid[:6]:
             lines.append(deal_line(d))
 
     lines.append(f"<i>Aggiornato alle {datetime.now().strftime('%H:%M')}</i>")
@@ -130,14 +141,36 @@ def build_daily_message(deals, free_games):
 # ---------------------------------------------------------------------------
 
 def send_message(chat_id, text, parse_mode="HTML"):
+    # Telegram max 4096 caratteri — tronca se necessario
+    if len(text) > 4000:
+        text = text[:3990] + "\n<i>... (lista troncata)</i>"
+
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
         "chat_id": chat_id,
         "text": text,
         "parse_mode": parse_mode,
         "disable_web_page_preview": True,
+        "link_preview_options": {"is_disabled": True},
     }
+    # Rimuovi parse_mode se None
+    if parse_mode is None:
+        del payload["parse_mode"]
+
     r = requests.post(url, json=payload, timeout=10)
+
+    # Se fallisce con HTML, riprova senza formattazione
+    if r.status_code == 400 and parse_mode == "HTML":
+        print(f"⚠️ Errore HTML parsing, riprovo in plain text...")
+        print(f"   Risposta Telegram: {r.text}")
+        plain = text.replace("<b>", "").replace("</b>", "").replace("<i>", "").replace("</i>", "")
+        plain = plain.replace("<s>", "").replace("</s>", "").replace("<u>", "").replace("</u>", "")
+        # Rimuovi tag <a href="...">...</a> mantenendo il testo
+        import re
+        plain = re.sub(r'<a href="[^"]*">([^<]*)</a>', r'\1', plain)
+        payload2 = {"chat_id": chat_id, "text": plain, "disable_web_page_preview": True}
+        r = requests.post(url, json=payload2, timeout=10)
+
     r.raise_for_status()
     return r.json()
 
@@ -271,6 +304,49 @@ HANDLERS = {
 }
 
 
+
+# ---------------------------------------------------------------------------
+# Gestione pulizia messaggi precedenti
+# ---------------------------------------------------------------------------
+
+def load_message_ids():
+    """Carica gli ID dei messaggi salvati dal giorno prima."""
+    if not os.path.exists(MESSAGE_IDS_FILE):
+        return []
+    try:
+        with open(MESSAGE_IDS_FILE, "r") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
+def save_message_ids(ids):
+    """Salva gli ID dei messaggi appena inviati."""
+    with open(MESSAGE_IDS_FILE, "w") as f:
+        json.dump(ids, f)
+
+
+def delete_message(chat_id, message_id):
+    """Cancella un singolo messaggio dal bot."""
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteMessage"
+    r = requests.post(url, json={"chat_id": chat_id, "message_id": message_id}, timeout=10)
+    return r.status_code == 200
+
+
+def delete_previous_messages():
+    """Cancella tutti i messaggi inviati dal bot il giorno prima."""
+    ids = load_message_ids()
+    if not ids:
+        print("📭 Nessun messaggio precedente da cancellare.")
+        return
+    print(f"🗑️ Cancello {len(ids)} messaggi precedenti...")
+    deleted = 0
+    for msg_id in ids:
+        if delete_message(CHAT_ID, msg_id):
+            deleted += 1
+    print(f"✅ Cancellati {deleted}/{len(ids)} messaggi.")
+
+
 # ---------------------------------------------------------------------------
 # Modalità: daily (GitHub Actions) o polling (manuale)
 # ---------------------------------------------------------------------------
@@ -278,11 +354,22 @@ HANDLERS = {
 def run_daily():
     """Invia il messaggio giornaliero. Usato da GitHub Actions."""
     print("📡 Modalità: invio giornaliero")
+
+    # Cancella i messaggi del giorno prima
+    delete_previous_messages()
+
+    # Invia i nuovi messaggi e salva gli ID
     deals = get_top_deals()
     free = get_free_games()
     msg = build_daily_message(deals, free)
-    send_message(CHAT_ID, msg)
-    print("✅ Messaggio inviato!")
+    result = send_message(CHAT_ID, msg)
+
+    # Salva l'ID del messaggio appena inviato
+    new_ids = []
+    if result and result.get("ok"):
+        new_ids.append(result["result"]["message_id"])
+    save_message_ids(new_ids)
+    print(f"✅ Messaggio inviato! ID salvato: {new_ids}")
 
 
 def run_polling():
